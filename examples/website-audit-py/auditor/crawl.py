@@ -39,6 +39,8 @@ def _map_resource_type(initiator):
 async def _audit_page(page, url, base_origin):
     console_errors = []
     js_errors = []
+    status_by_url = {}
+    headers_by_url = {}
 
     def handle_console(msg):
         if msg.type in ("error", "warning"):
@@ -47,8 +49,16 @@ async def _audit_page(page, url, base_origin):
     def handle_js_error(err):
         js_errors.append(str(err))
 
+    def handle_response(resp):
+        try:
+            status_by_url[resp.url] = resp.status
+            headers_by_url[resp.url] = {k.lower(): v for k, v in resp.headers.items()}
+        except Exception:
+            pass
+
     page.on("console", handle_console)
     page.on("pageerror", handle_js_error)
+    page.on("response", handle_response)
 
     start = asyncio.get_event_loop().time()
     try:
@@ -87,14 +97,16 @@ async def _audit_page(page, url, base_origin):
         start_time = r.get("startTime", 0) or 0
         resp_start = r.get("responseStart", 0) or 0
         ttfb = (resp_start - start_time) if resp_start and start_time else 0
+        req_url = r.get("name", "")
         responses.append({
-            "url": r.get("name", ""),
+            "url": req_url,
             "resource_type": rtype,
             "duration_ms": r.get("duration", 0) or 0,
             "ttfb_ms": ttfb,
             "body_bytes": r.get("encodedBodySize", 0) or 0,
             "transfer_bytes": r.get("transferSize", 0) or 0,
-            "headers": {},
+            "status": status_by_url.get(req_url, 0),
+            "headers": headers_by_url.get(req_url, {}),
         })
 
     try:

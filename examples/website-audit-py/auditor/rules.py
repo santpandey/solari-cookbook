@@ -12,6 +12,13 @@ THRESHOLDS = {
 }
 
 
+def _cache_headers(response):
+    headers = response.get("headers", {})
+    return any(
+        headers.get(k) for k in ("cache-control", "expires", "etag", "last-modified")
+    )
+
+
 def evaluate_page(page, base_origin):
     findings = []
     url = page["url"]
@@ -99,6 +106,15 @@ def evaluate_page(page, base_origin):
                 "severity": "medium",
                 "message": f"JavaScript bundle is {size:,} bytes: {req_url}",
                 "metric": f"{size:,} bytes",
+                "url": req_url,
+            })
+
+        if rtype in ("script", "stylesheet", "image", "font") and not _cache_headers(resp):
+            findings.append({
+                "type": "missing_cache_header",
+                "severity": "low",
+                "message": f"Static asset has no cache header: {req_url}",
+                "metric": "no Cache-Control/ETag",
                 "url": req_url,
             })
 
