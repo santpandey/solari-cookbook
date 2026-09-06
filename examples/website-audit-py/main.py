@@ -137,12 +137,23 @@ async def audit(url: str = Form(...), max_pages: int = Form(10), stealth: str = 
     if not os.environ.get("SOLARI_API_KEY"):
         return HTMLResponse(content="<h2>Error</h2><p>SOLARI_API_KEY is not set. Add it to .env and restart.</p>")
 
-    pages, base_origin = await crawl_website(url, max_pages=max_pages, stealth=stealth == "true")
-    findings = evaluate_all(pages, base_origin)
-    contact_email = find_contact_email(pages)
-    out_dir = write_report(base_origin, pages, findings, contact_email, email_sent=False)
-
-    return _render_results(base_origin, pages, findings, contact_email, out_dir)
+    try:
+        pages, base_origin = await crawl_website(url, max_pages=max_pages, stealth=stealth == "true")
+        findings = evaluate_all(pages, base_origin)
+        contact_email = find_contact_email(pages)
+        out_dir = write_report(base_origin, pages, findings, contact_email, email_sent=False)
+        return _render_results(base_origin, pages, findings, contact_email, out_dir)
+    except Exception as exc:
+        import traceback
+        return HTMLResponse(
+            content=f"""<!doctype html>
+<html><body>
+<a href="/">&larr; Back</a>
+<h2>Audit failed</h2>
+<p>{_escape(type(exc).__name__)}: {_escape(str(exc))}</p>
+<pre>{_escape(traceback.format_exc())}</pre>
+</body></html>"""
+        )
 
 
 @app.post("/send-email", response_class=PlainTextResponse)

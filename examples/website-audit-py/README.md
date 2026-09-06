@@ -24,8 +24,11 @@ Then open `http://127.0.0.1:8000` in your browser, enter a website URL, and clic
 If the launcher doesn't work, run uvicorn directly with the venv Python:
 
 ```bash
-.venv\Scripts\python -m uvicorn main:app --reload
+.venv\Scripts\python -m uvicorn main:app
 ```
+
+Do not add `--reload`; it currently conflicts with the Playwright subprocess
+on Windows and causes a `NotImplementedError`.
 
 ## What it checks
 
