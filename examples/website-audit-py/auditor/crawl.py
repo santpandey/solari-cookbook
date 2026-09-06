@@ -62,7 +62,9 @@ async def _audit_page(page, url, base_origin):
 
     start = asyncio.get_event_loop().time()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30_000)
+        # Use "load" instead of "networkidle" so ad/tracker-heavy pages don't
+        # hang for the full timeout waiting for background network to go idle.
+        await page.goto(url, wait_until="load", timeout=20_000)
     except Exception as exc:
         js_errors.append(f"navigation error: {exc}")
     load_time = (asyncio.get_event_loop().time() - start) * 1000
