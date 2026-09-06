@@ -1,5 +1,6 @@
 import html
 import os
+import re
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -29,7 +30,9 @@ INDEX_HTML = """<!doctype html>
         .finding.high { border-left-color: #d32f2f; }
         .finding.medium { border-left-color: #f57c00; }
         .finding.low { border-left-color: #388e3c; }
-        .dummy-form { margin-top: 16px; }
+        .exec-summary { background: #fff; padding: 12px; border-radius: 6px; border: 1px solid #ddd; margin: 12px 0; }
+        .exec-summary h3 { margin-top: 0; }
+        .dummy-form { margin-top: 16px; padding: 12px; background: #f0f8ff; border-radius: 6px; }
     </style>
 </head>
 <body>
@@ -42,6 +45,10 @@ INDEX_HTML = """<!doctype html>
         <div class="field">
             <label for="max_pages">Max pages to crawl</label>
             <input type="number" id="max_pages" name="max_pages" value="10" min="1" max="50">
+        </div>
+        <div class="field">
+            <label for="owner_email">Override contact email (optional)</label>
+            <input type="email" id="owner_email" name="owner_email" placeholder="owner@example.com" style="width: 100%%;">
         </div>
         <div class="field">
             <label>
@@ -59,8 +66,13 @@ def _escape(value):
     return html.escape(str(value))
 
 
+def _extract_number(metric, default=0):
+    match = re.search(r"(\d+)", str(metric))
+    return int(match.group(1)) if match else default
+
+
 def _render_results(base_url, pages, findings, contact_email, out_dir):
-    # Group high/medium findings by type. Show at most 15 groups, high first.
+    # Group high/medium findings by type. Show at most 15 groups, sorted by severity (high first).
     severity_order = {"high": 0, "medium": 1, "low": 2}
     high_medium = [f for f in findings if f.get("severity") in ("high", "medium")]
 
@@ -94,15 +106,104 @@ def _render_results(base_url, pages, findings, contact_email, out_dir):
         ),
     )[:15]
 
+    # --- executive summary metrics ---
+    high_count = sum(1 for f in findings if f.get("severity") == "high")
+    medium_count = sum(1 for f in findings if f.get("severity") == "medium")
+    low_count = sum(1 for f in findings if f.get("severity") == "low")
+
+    slowest_page = max(
+        (
+            (_extract_number(f.get("metric")), f.get("message", ""), f.get("url", ""))
+            for f in findings if f.get("type") == "slow_page"
+        ),
+        key=lambda x: x[0],
+        default=(0, "", ""),
+    )
+    worst_ttfb = max(
+        (
+            (_extract_number(f.get("metric")), f.get("message", ""), f.get("url", ""))
+            for f in findings if f.get("type") == "long_ttfb"
+        ),
+        key=lambda x: x[0],
+        default=(0, "", ""),
+    )
+    worst_duplicate = max(
+        (
+            (_extract_number(f.get("metric")), f.get("message", ""))
+            for f in findings if f.get("type") == "duplicate_api_call"
+        ),
+        key=lambda x: x[0],
+        default=(0, ""),
+    )
+
+    missing_alt_total = sum(
+        _extract_number(f.get("metric"))
+        for f in findings if f.get("type") == "missing_alt"
+    )
+    console_error_count = sum(1 for f in findings if f.get("type") == "console_error")
+    js_error_count = sum(1 for f in findings if f.get("type") == "js_error")
+    unoptimized_image_total = sum(
+        _extract_number(f.get("metric"))
+        for f in findings if f.get("type") == "unoptimized_image"
+    )
+    large_image_total = sum(
+        _extract_number(f.get("metric"))
+        for f in findings if f.get("type") == "large_image"
+    )
+
+    issue_counts = {}
+    for f in high_medium:
+        t = f.get("type", "unknown")
+        issue_counts[t] = issue_counts.get(t, 0) + 1
+    top_issue_types = sorted(
+        issue_counts.items(),
+        key=lambda kv: (severity_order.get(kv[0], 9), -kv[1]),
+    )[:8]
+
+    bullets = []
+    if slowest_page[0]:
+        bullets.append(f"Slowest page load: {slowest_page[0]:,} ms ({_escape(slowest_page[2])})")
+    if worst_ttfb[0]:
+        bullets.append(f"Worst server response (TTFB): {worst_ttfb[0]} ms")
+    if worst_duplicate[0]:
+        bullets.append(f"Highest duplicate API calls: {worst_duplicate[0]} calls to the same endpoint")
+    if missing_alt_total:
+        bullets.append(f"Images missing alt text: {missing_alt_total}")
+    if unoptimized_image_total:
+        bullets.append(f"Oversized images: {unoptimized_image_total}")
+    if large_image_total:
+        bullets.append(f"Large images: {large_image_total}")
+    if console_error_count:
+        bullets.append(f"Console errors: {console_error_count}")
+    if js_error_count:
+        bullets.append(f"JavaScript exceptions: {js_error_count}")
+
+    bullet_html = "".join(
+        f"<li>{_escape(b)}</li>" for b in bullets
+    ) if bullets else "<li>No major issues detected.</li>"
+
+    top_issue_html = "".join(
+        f"<li><strong>{_escape(t)}</strong>: {c} occurrence(s)</li>"
+        for t, c in top_issue_types
+    )
+
     summary = f"""
     <h2>Audit results for {_escape(base_url)}</h2>
-    <p>Crawled {len(pages)} page(s). Found {len(findings)} raw issue(s).</p>
-    <p>Showing top {len(display_groups)} high/medium issue type(s).</p>
-    <p>Contact email: {_escape(contact_email or "not found")}</p>
-    <p>Full report: {_escape(str(out_dir))}</p>
+    <p>Crawled {len(pages)} page(s). Found {len(findings)} raw issue(s): {high_count} high, {medium_count} medium, {low_count} low.</p>
+    <div class="exec-summary">
+        <h3>Executive summary</h3>
+        <ul>
+            {bullet_html}
+        </ul>
+        <h4>Top issue types</h4>
+        <ul>
+            {top_issue_html if top_issue_html else '<li>None</li>'}
+        </ul>
+    </div>
+    <p>Contact email: {_escape(contact_email or 'not found')} | Full report: {_escape(str(out_dir))}</p>
     """
 
-    findings_html = "<div class=\"findings\">"
+    findings_html = "<details><summary>Grouped high/medium findings</summary><div class=\"findings\">"
     if display_groups:
         for g in display_groups:
             severity = g["severity"]
@@ -122,15 +223,16 @@ def _render_results(base_url, pages, findings, contact_email, out_dir):
             """
     else:
         findings_html += "<p>No high or medium issues detected.</p>"
-    findings_html += "</div>"
+    findings_html += "</div></details>"
 
     dummy_form = ""
     if contact_email:
         dummy_form = f"""
         <form class="dummy-form" action="/send-email" method="post" onsubmit="event.preventDefault(); fetch('/send-email', {{method:'POST', body: new FormData(this)}}).then(r=>r.text()).then(t=>alert(t)); this.querySelector('button').disabled=true;">
-            <input type="hidden" name="contact_email" value="{_escape(contact_email)}">
+            <label for="contact_email">Send audit to</label>
+            <input type="email" id="contact_email" name="contact_email" value="{_escape(contact_email)}" style="width: 100%%; margin-bottom: 8px;">
             <input type="hidden" name="url" value="{_escape(base_url)}">
-            <button type="submit">Send audit email to {_escape(contact_email)}</button>
+            <button type="submit">Send audit email</button>
         </form>
         """
 
@@ -147,7 +249,9 @@ def _render_results(base_url, pages, findings, contact_email, out_dir):
         .finding.high {{ border-left-color: #d32f2f; }}
         .finding.medium {{ border-left-color: #f57c00; }}
         .finding.low {{ border-left-color: #388e3c; }}
-        .dummy-form {{ margin-top: 16px; }}
+        .exec-summary {{ background: #fff; padding: 12px; border-radius: 6px; border: 1px solid #ddd; margin: 12px 0; }}
+        .exec-summary h3 {{ margin-top: 0; }}
+        .dummy-form {{ margin-top: 16px; padding: 12px; background: #f0f8ff; border-radius: 6px; }}
     </style>
 </head>
 <body>
@@ -175,14 +279,19 @@ def index():
 
 
 @app.post("/audit", response_class=HTMLResponse)
-async def audit(url: str = Form(...), max_pages: int = Form(10), stealth: str = Form("")):
+async def audit(
+    url: str = Form(...),
+    max_pages: int = Form(10),
+    stealth: str = Form(""),
+    owner_email: str = Form(""),
+):
     if not os.environ.get("SOLARI_API_KEY"):
         return HTMLResponse(content="<h2>Error</h2><p>SOLARI_API_KEY is not set. Add it to .env and restart.</p>")
 
     try:
         pages, base_origin = await crawl_website(url, max_pages=max_pages, stealth=stealth == "true")
         findings = evaluate_all(pages, base_origin)
-        contact_email = find_contact_email(pages)
+        contact_email = find_contact_email(pages, override=owner_email or None)
         out_dir = write_report(base_origin, pages, findings, contact_email, email_sent=False)
         return _render_results(base_origin, pages, findings, contact_email, out_dir)
     except Exception as exc:
