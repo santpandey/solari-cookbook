@@ -60,30 +60,64 @@ def _escape(value):
 
 
 def _render_results(base_url, pages, findings, contact_email, out_dir):
-    # Show at most 15 high/medium findings, sorted by severity (high first).
+    # Group high/medium findings by type. Show at most 15 groups, high first.
     severity_order = {"high": 0, "medium": 1, "low": 2}
-    display_findings = sorted(
-        [f for f in findings if f.get("severity") in ("high", "medium")],
-        key=lambda f: severity_order.get(f.get("severity", "low"), 9),
+    high_medium = [f for f in findings if f.get("severity") in ("high", "medium")]
+
+    groups = {}
+    for f in high_medium:
+        t = f.get("type", "unknown")
+        if t not in groups:
+            groups[t] = {
+                "type": t,
+                "severity": f.get("severity", "low"),
+                "count": 0,
+                "examples": [],
+                "seen_urls": set(),
+            }
+        g = groups[t]
+        g["count"] += 1
+        # Keep the highest severity for the group.
+        if severity_order.get(f.get("severity"), 9) < severity_order.get(g["severity"], 9):
+            g["severity"] = f.get("severity")
+        # Keep up to 3 distinct example URLs.
+        url = f.get("url", "")
+        if url and url not in g["seen_urls"] and len(g["examples"]) < 3:
+            g["seen_urls"].add(url)
+            g["examples"].append(f)
+
+    display_groups = sorted(
+        groups.values(),
+        key=lambda g: (
+            severity_order.get(g["severity"], 9),
+            -g["count"],
+        ),
     )[:15]
 
     summary = f"""
     <h2>Audit results for {_escape(base_url)}</h2>
-    <p>Crawled {len(pages)} page(s). Found {len(findings)} issue(s).</p>
-    <p>Showing top {len(display_findings)} high/medium findings.</p>
+    <p>Crawled {len(pages)} page(s). Found {len(findings)} raw issue(s).</p>
+    <p>Showing top {len(display_groups)} high/medium issue type(s).</p>
     <p>Contact email: {_escape(contact_email or "not found")}</p>
-    <p>Report saved to: {_escape(str(out_dir))}</p>
+    <p>Full report: {_escape(str(out_dir))}</p>
     """
 
     findings_html = "<div class=\"findings\">"
-    if display_findings:
-        for f in display_findings:
-            severity = f.get("severity", "low")
+    if display_groups:
+        for g in display_groups:
+            severity = g["severity"]
+            examples_html = ""
+            for ex in g["examples"]:
+                examples_html += f"""
+                <li>{_escape(ex.get("message", ""))} <small>({_escape(ex.get("url", ""))})</small></li>
+                """
+            if g["count"] > len(g["examples"]):
+                more = g["count"] - len(g["examples"])
+                examples_html += f"<li><em>and {more} more like this</em></li>"
             findings_html += f"""
             <div class="finding {severity}">
-                <strong>[{severity.upper()}] {_escape(f.get("type", ""))}</strong><br>
-                {_escape(f.get("message", ""))}<br>
-                <small>metric: {_escape(f.get("metric", ""))} | url: {_escape(f.get("url", ""))}</small>
+                <strong>[{severity.upper()}] {_escape(g['type'])} ({g['count']} hit{'s' if g['count'] != 1 else ''})</strong>
+                <ul>{examples_html}</ul>
             </div>
             """
     else:
