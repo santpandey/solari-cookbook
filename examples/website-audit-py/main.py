@@ -1,95 +1,151 @@
-import argparse
-import asyncio
+import html
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from solari_sandbox import SandboxClient
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from auditor.crawl import crawl_website
-from auditor.emailer import send_outreach_email
 from auditor.reporter import find_contact_email, write_report
 from auditor.rules import evaluate_all
 
 load_dotenv()
 
 
-def _build_email_body(base_url, findings):
-    lines = [
-        f"I ran a quick technical scan of {base_url} and found a few issues that may be slowing the site down or hurting the user experience.",
-        "",
-        "Top findings:",
-    ]
-    for finding in findings[:5]:
-        lines.append(f"- {finding['message']}")
-    lines.extend([
-        "",
-        "I can help fix these if you are interested. Just reply to this email and we can discuss next steps.",
-        "",
-        "If this isn't the right contact, please let me know and I won’t write again.",
-    ])
-    return "\n".join(lines)
+INDEX_HTML = """<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Website Performance Auditor</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+        input, button { padding: 8px; font-size: 16px; }
+        button { cursor: pointer; }
+        label { display: block; margin: 12px 0 4px; }
+        .field { margin-bottom: 12px; }
+        .findings { background: #f6f6f6; padding: 12px; border-radius: 6px; }
+        .finding { margin: 6px 0; padding: 8px; background: #fff; border-left: 4px solid #999; }
+        .finding.high { border-left-color: #d32f2f; }
+        .finding.medium { border-left-color: #f57c00; }
+        .finding.low { border-left-color: #388e3c; }
+        .dummy-form { margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <h1>Website Performance Auditor</h1>
+    <form action="/audit" method="post">
+        <div class="field">
+            <label for="url">Website URL</label>
+            <input type="url" id="url" name="url" placeholder="https://example.com" required style="width: 100%%;">
+        </div>
+        <div class="field">
+            <label for="max_pages">Max pages to crawl</label>
+            <input type="number" id="max_pages" name="max_pages" value="10" min="1" max="50">
+        </div>
+        <div class="field">
+            <label>
+                <input type="checkbox" name="stealth" value="true">
+                Use stealth mode
+            </label>
+        </div>
+        <button type="submit">Scan website</button>
+    </form>
+</body>
+</html>"""
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Audit a small-business website for performance issues.")
-    parser.add_argument("url", help="Website URL to audit")
-    parser.add_argument("--max-pages", type=int, default=10, help="Max pages to crawl")
-    parser.add_argument("--owner-email", default=None, help="Override discovered contact email")
-    parser.add_argument("--dry-run", action="store_true", help="Audit and log but do not send email")
-    parser.add_argument("--stealth", action="store_true", help="Use stealth mode (recommended for real sites)")
-    args = parser.parse_args()
+def _escape(value):
+    return html.escape(str(value))
 
-    if not os.environ.get("SOLARI_API_KEY"):
-        raise SystemExit("Set SOLARI_API_KEY in .env or environment.")
 
-    print(f"Auditing {args.url} ...")
-    pages, base_origin = await crawl_website(args.url, max_pages=args.max_pages, stealth=args.stealth)
-    print(f"Crawled {len(pages)} page(s).")
+def _render_results(base_url, pages, findings, contact_email, out_dir):
+    summary = f"""
+    <h2>Audit results for {_escape(base_url)}</h2>
+    <p>Crawled {len(pages)} page(s). Found {len(findings)} issue(s).</p>
+    <p>Contact email: {_escape(contact_email or "not found")}</p>
+    <p>Report saved to: {_escape(str(out_dir))}</p>
+    """
 
-    findings = evaluate_all(pages, base_origin)
-    print(f"Found {len(findings)} issue(s).")
-
-    contact_email = find_contact_email(pages, override=args.owner_email)
-    if contact_email:
-        print(f"Contact email: {contact_email}")
+    findings_html = "<div class=\"findings\">"
+    if findings:
+        for f in findings:
+            severity = f.get("severity", "low")
+            findings_html += f"""
+            <div class="finding {severity}">
+                <strong>[{severity.upper()}] {_escape(f.get("type", ""))}</strong><br>
+                {_escape(f.get("message", ""))}<br>
+                <small>metric: {_escape(f.get("metric", ""))} | url: {_escape(f.get("url", ""))}</small>
+            </div>
+            """
     else:
-        print("No contact email found on the site.")
+        findings_html += "<p>No issues detected.</p>"
+    findings_html += "</div>"
 
-    email_sent = False
-    if not args.dry_run and contact_email:
-        if not os.environ.get("GMAIL_APP_PASSWORD") or not os.environ.get("GMAIL_USER"):
-            raise SystemExit("Set GMAIL_USER and GMAIL_APP_PASSWORD in .env to send email.")
+    dummy_form = ""
+    if contact_email:
+        dummy_form = f"""
+        <form class="dummy-form" action="/send-email" method="post" onsubmit="event.preventDefault(); fetch('/send-email', {{method:'POST', body: new FormData(this)}}).then(r=>r.text()).then(t=>alert(t)); this.querySelector('button').disabled=true;">
+            <input type="hidden" name="contact_email" value="{_escape(contact_email)}">
+            <input type="hidden" name="url" value="{_escape(base_url)}">
+            <button type="submit">Send audit email to {_escape(contact_email)}</button>
+        </form>
+        """
 
-        from_email = os.environ["GMAIL_USER"]
-        smtp_password = os.environ["GMAIL_APP_PASSWORD"]
-        subject = f"Website performance findings for {base_origin}"
-        body = _build_email_body(base_origin, findings)
-
-        print("Starting sandbox to send email ...")
-        async with SandboxClient(
-            api_key=os.environ["SOLARI_API_KEY"], base_url="https://api.getsolari.com"
-        ) as client:
-            sandbox = await client.create(template="base", timeout_ms=5 * 60_000)
-            try:
-                await sandbox.connect()
-                email_sent = await send_outreach_email(
-                    sandbox,
-                    from_email,
-                    contact_email,
-                    subject,
-                    body,
-                    from_email,
-                    smtp_password,
-                )
-                print(f"Email sent: {email_sent}")
-            finally:
-                await sandbox.kill()
-    elif args.dry_run:
-        print("Dry run: no email sent.")
-
-    out_dir = write_report(base_origin, pages, findings, contact_email, email_sent)
-    print(f"Report written to: {out_dir}")
+    return HTMLResponse(content=f"""<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Website Performance Auditor - Results</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }}
+        button {{ padding: 8px 16px; font-size: 16px; cursor: pointer; }}
+        .findings {{ background: #f6f6f6; padding: 12px; border-radius: 6px; }}
+        .finding {{ margin: 6px 0; padding: 8px; background: #fff; border-left: 4px solid #999; }}
+        .finding.high {{ border-left-color: #d32f2f; }}
+        .finding.medium {{ border-left-color: #f57c00; }}
+        .finding.low {{ border-left-color: #388e3c; }}
+        .dummy-form {{ margin-top: 16px; }}
+    </style>
+</head>
+<body>
+    <a href="/">&larr; Back</a>
+    {summary}
+    {findings_html}
+    {dummy_form}
+</body>
+</html>""")
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not os.environ.get("SOLARI_API_KEY"):
+        print("Warning: SOLARI_API_KEY is not set. Audits will fail until it is configured in .env.")
+    yield
+
+
+app = FastAPI(title="Website Performance Auditor", lifespan=lifespan)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTMLResponse(content=INDEX_HTML)
+
+
+@app.post("/audit", response_class=HTMLResponse)
+async def audit(url: str = Form(...), max_pages: int = Form(10), stealth: str = Form("")):
+    if not os.environ.get("SOLARI_API_KEY"):
+        return HTMLResponse(content="<h2>Error</h2><p>SOLARI_API_KEY is not set. Add it to .env and restart.</p>")
+
+    pages, base_origin = await crawl_website(url, max_pages=max_pages, stealth=stealth == "true")
+    findings = evaluate_all(pages, base_origin)
+    contact_email = find_contact_email(pages)
+    out_dir = write_report(base_origin, pages, findings, contact_email, email_sent=False)
+
+    return _render_results(base_origin, pages, findings, contact_email, out_dir)
+
+
+@app.post("/send-email", response_class=PlainTextResponse)
+def send_email(contact_email: str = Form(...), url: str = Form(...)):
+    # Dummy: no actual email is sent. The real SMTP code has been removed.
+    return PlainTextResponse(content=f"Email sent to {contact_email} for {url}")
