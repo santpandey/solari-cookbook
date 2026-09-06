@@ -60,16 +60,24 @@ def _escape(value):
 
 
 def _render_results(base_url, pages, findings, contact_email, out_dir):
+    # Show at most 15 high/medium findings, sorted by severity (high first).
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    display_findings = sorted(
+        [f for f in findings if f.get("severity") in ("high", "medium")],
+        key=lambda f: severity_order.get(f.get("severity", "low"), 9),
+    )[:15]
+
     summary = f"""
     <h2>Audit results for {_escape(base_url)}</h2>
     <p>Crawled {len(pages)} page(s). Found {len(findings)} issue(s).</p>
+    <p>Showing top {len(display_findings)} high/medium findings.</p>
     <p>Contact email: {_escape(contact_email or "not found")}</p>
     <p>Report saved to: {_escape(str(out_dir))}</p>
     """
 
     findings_html = "<div class=\"findings\">"
-    if findings:
-        for f in findings:
+    if display_findings:
+        for f in display_findings:
             severity = f.get("severity", "low")
             findings_html += f"""
             <div class="finding {severity}">
@@ -79,7 +87,7 @@ def _render_results(base_url, pages, findings, contact_email, out_dir):
             </div>
             """
     else:
-        findings_html += "<p>No issues detected.</p>"
+        findings_html += "<p>No high or medium issues detected.</p>"
     findings_html += "</div>"
 
     dummy_form = ""
