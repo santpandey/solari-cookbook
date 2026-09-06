@@ -9,17 +9,23 @@ results to JSON/CSV, and shows a dummy "Send email" button for the site owner.
 ```bash
 cd examples/website-audit-py
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.venv\Scripts\python -m pip install -r requirements.txt
 
 cp .env.example .env
 # Edit .env and set SOLARI_API_KEY=slr_live_...
 
-python -m uvicorn main:app --reload
+# Use the launcher (uses the venv automatically)
+python start.py
 ```
 
-Open `http://127.0.0.1:8000` in your browser, enter a website URL, and click
+Then open `http://127.0.0.1:8000` in your browser, enter a website URL, and click
 **Scan website**.
+
+If the launcher doesn't work, run uvicorn directly with the venv Python:
+
+```bash
+.venv\Scripts\python -m uvicorn main:app --reload
+```
 
 ## What it checks
 
@@ -44,3 +50,5 @@ Open `http://127.0.0.1:8000` in your browser, enter a website URL, and click
 - The "Send audit email" button is a dummy action. No email is actually sent.
 - The crawler still runs on Solari's cloud browser, so you need a valid
   `SOLARI_API_KEY`.
+- Always use the venv Python when running uvicorn, otherwise you'll see
+  `ModuleNotFoundError: No module named 'solari_browser'`.
